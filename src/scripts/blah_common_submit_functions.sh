@@ -130,6 +130,34 @@ function bls_fl_subst_and_accumulate ()
   done
 }
 
+function bls_fl_test_exists ()
+{
+#
+# Usage: bls_fl_test_exists container_name
+# Verfies all container_name "@@F_LOCAL" exists
+# First missing file is returned in $bls_fl_test_exists_result.
+#
+  local container_name
+
+  container_name=${1:?"Missing container name argument to bls_fl_subst_and_accumulate"}
+
+  local last_argument
+
+  eval "last_argument=\${bls_${container_name}_counter:=0}"
+
+  local ind
+  bls_fl_test_exists_result=
+  for (( ind=0 ; ind < $last_argument ; ind++ )) ; do
+      bls_fl_subst $container_name $ind "@@F_LOCAL"
+      if [ ! -z "$bls_fl_subst_result" -a ! -f "$bls_fl_subst_result" ] ; then
+          bls_fl_test_exists_result="${bls_fl_subst_result}"
+          return 1
+      fi
+  done
+  return 0
+}
+
+
 function bls_fl_subst_and_dump ()
 {
 #
@@ -633,8 +661,9 @@ function bls_start_job_wrapper ()
   fi
 
   echo "mkdir \$new_home"
-  echo "trap 'wait \$job_pid; cd \$old_home; rm -rf \$new_home; exit 255' 1 2 3 15 24"
+  echo "trap 'kill -s SIGQUIT \$job_pid ; wait \$job_pid; cd \$old_home; rm -rf \$new_home; exit 255' 1 2 3 15 24"
   echo "trap 'wait \$job_pid; cd \$old_home; rm -rf \$new_home' 0"
+
 
   echo "# Copy into new home any shared input sandbox file"
   bls_fl_subst_and_dump inputcopy "cp \"@@F_LOCAL\" \"\$new_home/@@F_REMOTE\" &> /dev/null" 
@@ -712,10 +741,13 @@ function bls_start_job_wrapper ()
   echo "# Move all relative outputsand paths out of temp home"
   echo "cd \$new_home"
   bls_fl_subst_relative_paths_and_dump outputsand "mv \"@@F_WORKNAME\" \"@@F_REMOTE\" 2> /dev/null" "\\\$old_home" 
+  echo "if declare -f blah_stageout_trap &>/dev/null; then"
+  echo "  pushd \$old_home"
+  echo "  blah_stageout_trap"
+  echo "  popd"
+  echo "fi"
   echo "# Move any remapped outputsand file to shared directories"
   bls_fl_subst_relative_paths_and_dump outputmove "mv \"@@F_REMOTE\" \"@@F_LOCAL\" 2> /dev/null"
-  
-  echo ""
   echo "# Remove the staged files, if any"
   bls_fl_subst_and_dump inputcopy "rm \"@@F_REMOTE\" 2> /dev/null"
   bls_fl_subst_relative_paths_and_dump inputsand "rm \"@@F_WORKNAME\" 2> /dev/null"

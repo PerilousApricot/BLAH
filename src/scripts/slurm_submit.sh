@@ -31,7 +31,6 @@
 # Default values for configuration variables
 slurm_std_storage=${slurm_std_storage:-/dev/null}
 slurm_binpath=${slurm_binpath:-/usr/bin}
-
 bls_parse_submit_options "$@"
 
 bls_setup_all_files
@@ -45,10 +44,11 @@ cat > $bls_tmp_file << end_of_preamble
 # stgcmd = $bls_opt_stgcmd
 # proxy_string = $bls_opt_proxy_string
 # proxy_local_file = $bls_proxy_local_file
+# args = $@
 #
 # SLURM directives:
-#SBATCH -o $slurm_std_storage
-#SBATCH -e $slurm_std_storage
+#   #  SBATCH -o /home/meloam/debug_slurm_log/slurm-ce4-%j.out
+#SBATCH -o /dev/null
 end_of_preamble
 
 #local batch system-specific file output must be added to the submit file
@@ -65,46 +65,84 @@ fi
 
 # Simple support for multi-cpu attributes
 if [[ $bls_opt_mpinodes -gt 1 ]] ; then
-  echo "#SBATCH --nodes=1" >> $bls_tmp_file
   echo "#SBATCH --ntasks=1" >> $bls_tmp_file
   echo "#SBATCH --cpus-per-task=$bls_opt_mpinodes" >> $bls_tmp_file
 fi
 
-# Do the local and extra args after all #SBATCH commands, otherwise slurm ignores anything
-# after a non-#SBATCH command
+# Ensure local files actually exist before submitting job. This prevents
+# unnecessary churn on the scheduler if the files don't exist.  
+if ! bls_fl_test_exists inputsand ; then
+    echo "Input sandbox file doesn't exist: $bls_fl_test_exists_result" >&2
+    err_prefix="$(date) ($$) $(whoami)"
+    echo "${err_prefix} Input sandbox file doesn't exist: $bls_fl_test_exists_result" >> /tmp/melo-ce2-debug-meloam.txt
+	echo Error # for the sake of waiting fgets in blahpd
+    exit 1
+fi
+
 bls_set_up_local_and_extra_args
 
 # Input and output sandbox setup.
-# Assume all filesystems are shared.
+echo "# Begin file staging" >> $bls_tmp_file
+echo "env" >> $bls_tmp_file
+echo "set -x" >> $bls_tmp_file
+echo "cd \$HOME" >> $bls_tmp_file
+# -o PubKeyAuthentication=yes -o PasswordAuthentication=no
+bls_fl_subst_and_dump inputsand "curl --retry 5 -s -o @@F_REMOTE http://`hostname -s`:8080@@F_LOCAL" >> $bls_tmp_file
+bls_fl_subst_and_dump inputsand "chmod go-rwx @@F_REMOTE" >> $bls_tmp_file
+echo "function blah_stageout_trap() {" >> $bls_tmp_file
+echo "set -x" >> $bls_tmp_file
+bls_fl_subst_and_dump outputsand "    curl --retry 5 -s -F 'data=@@@F_REMOTE' http://`hostname -s`:8080@@F_LOCAL" >> $bls_tmp_file
+bls_fl_subst_and_dump outputsand "    rm -f @@F_REMOTE" >> $bls_tmp_file
+echo "    sleep 5" >> $bls_tmp_file
+echo "}" >> $bls_tmp_file
+#echo "set +x" >> $bls_tmp_file
+echo "# End file staging" >> $bls_tmp_file
+
 
 bls_add_job_wrapper
-
 
 ###############################################################
 # Submit the script
 ###############################################################
 
 datenow=`date +%Y%m%d`
-jobID=`${slurm_binpath}/sbatch $bls_tmp_file` # actual submission
-retcode=$?
+retry=0
+MAX_RETRY=3
+if [ "$(whoami)" == "uscms010" ]; then
+    MAX_RETRY=12
+fi
+until [ $retry -ge $MAX_RETRY ]; do 
+    # jobID=$(${slurm_binpath}/sbatch $bls_tmp_file 2>&1 >/dev/null | sed 's/^/subatt: /' >> /tmp/melo-ce2-debug-meloam.txt)  # actual submission
+    jobID=$(exec 2>>/tmp/melo-ce2-debug-meloam.txt ; ${slurm_binpath}/sbatch $bls_tmp_file)
+    retcode=$?
+    if [ "$retcode" == "0" ] ; then
+        break
+    fi
+    retry=$[$retry+1]
+    echo "$(date) $jobID" | sed 's/^/retry: /' >> /tmp/melo-ce2-debug-meloam.txt
+    sleep 10
+done
 
 if [ "$retcode" != "0" ] ; then
-	rm -f $bls_tmp_file
-	echo "Error from sbatch: $jobID" >&2
-	exit 1
+    rm -f $bls_tmp_file
+    echo "Error from sbatch: $jobID" >&2
+    echo "$(date) $jobID" | sed 's/^/error: /' >> /tmp/melo-ce2-debug-meloam.txt
+	echo Error # for the sake of waiting fgets in blahpd
+    exit 1
 fi
 
 # The job id is actually the first numbers in the string (slurm support)
-jobID=`echo $jobID | awk 'match($0,/[0-9]+/){print substr($0, RSTART, RLENGTH)}'`
-if [ "X$jobID" == "X" ]; then
+jobID2=`echo $jobID | awk 'match($0,/[0-9]+/){print substr($0, RSTART, RLENGTH)}'`
+if [ "X$jobID2" == "X" ]; then
 	rm -f $bls_tmp_file
+    echo "$jobID" | sed 's/^/error: /' >> /tmp/melo-ce2-debug-meloam.txt
 	echo "Error: job id missing" >&2
 	echo Error # for the sake of waiting fgets in blahpd
 	exit 1
 fi
 
 # Compose the blahp jobID ("slurm/" + datenow + pbs jobid)
-blahp_jobID="slurm/`basename $datenow`/$jobID"
+blahp_jobID="slurm/`basename $datenow`/$jobID2"
 
 echo "BLAHP_JOBID_PREFIX$blahp_jobID"
   
